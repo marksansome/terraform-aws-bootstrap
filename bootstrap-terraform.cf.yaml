@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Bootstrap Terraform resources for storing state
+
+Resources:
+  StateLogBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub tf-state-logs-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub tf-state-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref StateLogBucket
+        LogFilePrefix: !Sub tf-state-${AWS::AccountId}-${AWS::Region}/
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StateBucket
+      PolicyDocument:
+        Statement:
+          - Sid: Deny deletion of objects
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - "s3:DeleteObject"
+            Resource: !Join ["/", [!GetAtt StateBucket.Arn, "*"]]
+          - Sid: Deny requests that do not use TLS
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - "s3:*"
+            Resource: !Join ["/", [!GetAtt StateBucket.Arn, "*"]]
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: Deny object uploads not using default encryption settings
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - "s3:PutObject"
+            Resource: !Join ["/", [!GetAtt StateBucket.Arn, "*"]]
+            Condition:
+              # The Null-condition allows uploads without encryption information in the request
+              # (i.e., requests with default S3 bucket encryption) and the
+              # StringNotEquals-condition denies uploads with invalid encryption information.
+              # Note that using StringNotEqualsIfExists doesn’t work for uploads without encryption information.
+              # The condition evaluates to true and denies the upload because of the Deny-effect.
+              "Null":
+                s3:x-amz-server-side-encryption: false
+              StringNotEqualsIfExists:
+                s3:x-amz-server-side-encryption:
+                  - "AES256"
+                  - "aws:kms"
+
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub tf-state-${AWS::AccountId}-${AWS::Region}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: LockID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: LockID
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        # Cloudformation doesn't support automatically tagging of DynamoDB
+        - Key: aws-cloudformation-logical-id
+          Value: "TerraformStateLockDynamoDBTable"
+        - Key: aws-cloudformation-stack-id
+          Value: !Ref "AWS::StackId"
+        - Key: aws-cloudformation-stack-name
+          Value: !Ref "AWS::StackName"
+
+Outputs:
+  StateLogBucket:
+    Description: Name of the state log S3 bucket
+    Value: !Ref StateLogBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-StateLogBucket"
+
+  StateBucket:
+    Description: Name of the state S3 bucket
+    Value: !Ref StateBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-StateBucket"
+
+  StateTable:
+    Description: Name of the state DynamoDB table
+    Value: !Ref StateTable
+    Export:
+      Name: !Sub "${AWS::StackName}-StateTable"
